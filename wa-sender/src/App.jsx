@@ -11,7 +11,7 @@ function App() {
       <div className="h-full flex flex-col">
         <header className="p-4 sm:p-6">
           <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-white text-center mb-6">
-            WhatsApp Automation Dashboard
+            Whatsapp Sender
           </h1>
           <Navbar activeView={currentView} onNavigate={setCurrentView} />
         </header>
@@ -22,7 +22,7 @@ function App() {
         </main>
         
         <footer className="text-center p-4 text-[#00509F] text-sm font-medium">
-          Dibuat dengan React, Vite, dan Tailwind CSS
+          @ericarwido. All rights reserved.
         </footer>
       </div>
     </div>

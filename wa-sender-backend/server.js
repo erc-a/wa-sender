@@ -46,8 +46,109 @@ const messageRoutes = require('./routes/messages');
 // Use the simplest possible implementation of history routes
 const historyRoutes = require('./routes/history.simple');
 
+// Require WhatsApp service globally
+const whatsappService = require('./services/whatsapp');
+
+// Set up route handlers
 app.use('/api/messages', messageRoutes);
+
+// Handle both /api/history and /history with the same router
 app.use('/api/history', historyRoutes);
+app.use('/history', historyRoutes);
+
+// Add a debug endpoint to check if server is running
+app.get('/api/debug', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Server is running correctly',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Add WhatsApp specific routes
+app.get('/api/whatsapp/status', (req, res) => {
+    try {
+        // Directly use the whatsapp service
+        const whatsappService = require('./services/whatsapp');
+        
+        console.log('WhatsApp Status Check - Service Object:', {
+            isReady: whatsappService.isReady,
+            isInitializing: whatsappService.isInitializing,
+            hasError: whatsappService.lastError !== null
+        });
+        
+        const status = {
+            isReady: whatsappService.isReady,
+            isInitializing: whatsappService.isInitializing,
+            lastError: whatsappService.lastError,
+            qrCode: whatsappService.qrCode,
+            connected: whatsappService.isReady
+        };
+        res.json(status);
+    } catch (error) {
+        console.error('Error getting WhatsApp status:', error);
+        res.status(500).json({ error: 'Failed to get WhatsApp status' });
+    }
+});
+
+app.get('/api/whatsapp/qr', async (req, res) => {
+    try {
+        // Use the already imported whatsappService
+        console.log('WhatsApp QR Code Request - Query:', req.query);
+        
+        const forceRefresh = req.query.refresh === 'true';
+        const hardReset = req.query.hard_reset === 'true';
+        
+        console.log('WhatsApp QR Code - Service State:', {
+            isReady: whatsappService.isReady,
+            isInitializing: whatsappService.isInitializing,
+            hasQR: whatsappService.qrCode !== null,
+            forceRefresh,
+            hardReset
+        });
+        
+        if (forceRefresh || hardReset) {
+            await whatsappService.initialize(hardReset);
+        }
+        
+        const qrCodeData = whatsappService.qrCode;
+        
+        if (whatsappService.isReady) {
+            return res.json({ 
+                success: true, 
+                connected: true,
+                message: 'WhatsApp is connected'
+            });
+        } else if (qrCodeData) {
+            return res.json({ 
+                success: true, 
+                qrCode: qrCodeData,
+                connected: false,
+                message: 'QR Code ready for scanning'
+            });
+        } else if (whatsappService.isInitializing) {
+            return res.json({ 
+                success: true, 
+                connected: false,
+                initializing: true,
+                message: 'WhatsApp is initializing...'
+            });
+        } else {
+            return res.status(500).json({ 
+                success: false, 
+                connected: false,
+                error: whatsappService.lastError || 'Unable to generate QR code'
+            });
+        }
+    } catch (error) {
+        console.error('Error getting WhatsApp QR code:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Failed to get WhatsApp QR code',
+            connected: false
+        });
+    }
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -145,58 +145,118 @@ router.get('/qr', (req, res) => {
 // Send a new message
 router.post('/send', async (req, res) => {
     try {
-        const {
-            namaNasabah,
-            nomorTelepon,
-            noRekening,
-            jumlahTunggakan,
-            skorKredit
-        } = req.body;
-
-        // Validate input
-        if (!namaNasabah || !nomorTelepon || !noRekening || !jumlahTunggakan || !skorKredit) {
-            return res.status(400).json({ message: 'Semua field harus diisi' });
+        console.log('Received send message request:', req.body); // Debug log
+        
+        const { to, message, formData } = req.body;
+        
+        if (!to || !message) {
+            console.log('Missing required fields:', { to: !!to, message: !!message }); // Debug log
+            return res.status(400).json({
+                success: false,
+                message: 'Phone number and message are required'
+            });
+        }
+        
+        // Log form data if available
+        if (formData) {
+            console.log('Form data received:', formData);
         }
 
-        const messageData = {
-            nama_nasabah: namaNasabah,
-            nomor_telepon: nomorTelepon,
-            no_rekening: noRekening,
-            jumlah_tunggakan: jumlahTunggakan,
-            skor_kredit: skorKredit
-        };
-
-        // Format the message
-        const formattedMessage = formatMessage(messageData);
-
-        // Send WhatsApp message
-        const waMessage = await whatsappService.sendMessage(nomorTelepon, formattedMessage);
-
-        // Save to database
-        const [result] = await db.execute(
-            `INSERT INTO messages (nama_nasabah, nomor_telepon, no_rekening, jumlah_tunggakan, skor_kredit, wa_message_id, status)
-             VALUES (?, ?, ?, ?, ?, ?, 'sent')`,
-            [namaNasabah, nomorTelepon, noRekening, jumlahTunggakan, skorKredit, waMessage.id.id]
-        );
-
-        // Get the inserted message
-        const [message] = await db.execute(
-            'SELECT * FROM messages WHERE id = ?',
-            [result.insertId]
-        );
-
-        res.status(201).json({
-            success: true,
-            message: 'Pesan berhasil dikirim',
-            data: message[0]
-        });
-
+        console.log(`Attempting to send message to: ${to}`); // Debug log
+        console.log(`Message length: ${message.length} characters`); // Debug log
+        
+        const result = await whatsappService.sendMessage(to, message);
+        
+        console.log('Send message result:', result); // Debug log
+          // Log to database if available
+        if (db) {
+            try {
+                // Parse message to extract customer info (using more precise regex patterns)
+                let nama_nasabah = 'Unknown';
+                let no_rekening = 'Unknown';
+                let jumlah_tunggakan = 0;
+                let skor_kredit = 0;
+                
+                // Extract information from the message using more precise patterns
+                try {
+                    // Extract customer name (looking for the pattern right after "Halo" at the beginning)
+                    const nameMatch = message.match(/Halo ([^,\n]+)/);
+                    if (nameMatch && nameMatch[1]) {
+                        nama_nasabah = nameMatch[1].trim();
+                    }
+                    
+                    // Extract account number (looking specifically for the format with label)
+                    const rekeningMatch = message.match(/No\. Rekening: ([^\n]+)/);
+                    if (rekeningMatch && rekeningMatch[1]) {
+                        no_rekening = rekeningMatch[1].trim();
+                    }
+                    
+                    // Extract debt amount with more precise pattern
+                    const tunggakanMatch = message.match(/tunggakan kredit sebesar ([^\n.]+)/);
+                    if (tunggakanMatch && tunggakanMatch[1]) {
+                        // Convert to number, handling IDR format
+                        const amountStr = tunggakanMatch[1].replace(/[^\d]/g, '');
+                        jumlah_tunggakan = parseInt(amountStr);
+                    }
+                    
+                    // Extract credit score from status line
+                    const skorMatch = message.match(/Status Kredit: ([^\n]+)/);
+                    if (skorMatch && skorMatch[1]) {
+                        // Try to determine score from status text
+                        const statusText = skorMatch[1].toLowerCase();
+                        if (statusText.includes('lancar')) {
+                            skor_kredit = 1;
+                        } else if (statusText.includes('dpk') || statusText.includes('1-90')) {
+                            skor_kredit = 2;
+                        } else if (statusText.includes('tidak lancar') || statusText.includes('91-120')) {
+                            skor_kredit = 3;
+                        } else if (statusText.includes('diragukan') || statusText.includes('121-180')) {
+                            skor_kredit = 4;
+                        } else if (statusText.includes('macet') || statusText.includes('180')) {
+                            skor_kredit = 5;
+                        } else {
+                            skor_kredit = 650;
+                        }
+                    } else {
+                        skor_kredit = 650; // Default
+                    }
+                } catch (parseError) {
+                    console.warn('Failed to parse message data:', parseError);
+                }
+                  // Use form data if available, otherwise use parsed data
+                if (req.body.formData) {
+                    nama_nasabah = req.body.formData.nama_nasabah || nama_nasabah;
+                    no_rekening = req.body.formData.no_rekening || no_rekening;
+                    jumlah_tunggakan = req.body.formData.jumlah_tunggakan || jumlah_tunggakan;
+                    skor_kredit = req.body.formData.skor_kredit || skor_kredit;
+                }
+                
+                console.log('Inserting message with final data:', {
+                    nama_nasabah,
+                    nomor_telepon: result.to,
+                    no_rekening,
+                    jumlah_tunggakan,
+                    skor_kredit
+                });
+                
+                await db.query(
+                    'INSERT INTO messages (nama_nasabah, nomor_telepon, no_rekening, jumlah_tunggakan, skor_kredit, status, wa_message_id, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [nama_nasabah, result.to, no_rekening, jumlah_tunggakan, skor_kredit, 'sent', result.messageId || null, new Date()]
+                );
+                console.log('Message logged to database'); // Debug log
+            } catch (dbError) {
+                console.error('Failed to log message to database:', dbError);
+            }
+        }
+        
+        res.json(result);
     } catch (error) {
-        console.error('Error sending message:', error);
+        console.error('Error in send message route:', error);
+        console.error('Error stack:', error.stack); // Debug log
+        
         res.status(500).json({
             success: false,
-            message: 'Gagal mengirim pesan',
-            error: error.message
+            message: error.message || 'Failed to send message'
         });
     }
 });

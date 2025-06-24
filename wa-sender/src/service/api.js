@@ -1,150 +1,133 @@
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = 'http://localhost:5000';
 
-// Create a shared abort controller that can be reused
-let currentController = null;
+// Function to abort previous requests
+let abortController = null;
 
-// Helper function to abort any pending requests
 const abortPendingRequests = () => {
-    if (currentController) {
-        currentController.abort();
-        currentController = null;
-    }
+  if (abortController) {
+    abortController.abort();
+  }
+  abortController = new AbortController();
+  return abortController.signal;
 };
 
-export const sendMessage = async (messageData) => {
-    try {
-        const response = await fetch(`${API_BASE_URL}/messages/send`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(messageData)
-        });
-        return await response.json();
-    } catch (error) {
-        console.error('Error sending message:', error);
-        throw error;
+export const sendMessage = async (phoneNumber, message, formData = null) => {
+  try {
+    console.log('Sending request with:', { to: phoneNumber, message, formData }); // Debug log
+    
+    // Prepare request data
+    const requestData = {
+      to: phoneNumber,
+      message: message
+    };
+    
+    // Add form data if available
+    if (formData) {
+      requestData.formData = formData;
     }
+    
+    const response = await fetch(`${API_BASE_URL}/api/messages/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestData)
+    });
+
+    console.log('Response status:', response.status); // Debug log
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ message: 'Network error' }));
+      throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    console.log('Send message response:', data); // Debug log
+    return data;
+  } catch (error) {
+    console.error('Error sending message:', error);
+    throw error;
+  }
 };
 
-export const getQRCode = async (refresh = false, hardReset = false) => {
-    try {
-        console.log('Fetching WhatsApp QR code...', refresh ? '(with refresh)' : '', hardReset ? '(with hard reset)' : '');
-        
-        // Abort any pending requests before starting a new one
-        abortPendingRequests();
-        
-        // Create a new controller for this request
-        currentController = new AbortController();
-        
-        // Add cache-busting query parameter to API URL only
-        const cacheBuster = Date.now();
-        let url;
-        
-        if (hardReset) {
-            url = `${API_BASE_URL}/messages/qr?refresh=true&hardReset=true&_=${cacheBuster}`;
-        } else if (refresh) {
-            url = `${API_BASE_URL}/messages/qr?refresh=true&_=${cacheBuster}`;
-        } else {
-            url = `${API_BASE_URL}/messages/qr?_=${cacheBuster}`;
-        }
-        
-        const response = await fetch(url, {
-            headers: {
-                'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
-                'Pragma': 'no-cache',
-                'Expires': '-1'
-            },
-            cache: refresh ? 'reload' : 'no-cache',
-            signal: currentController.signal
-        });
-        
-        const data = await response.json();
-        console.log('QR code response received:', data);
-        
-        return data;
-    } catch (error) {
-        // Don't log abort errors as they are expected
-        if (error.name !== 'AbortError') {
-            console.error('Error getting QR code:', error);
-        }
-        
-        // Check if this is a connection error
-        const isConnectionError = 
-            error.name === 'TypeError' && 
-            (error.message.includes('Failed to fetch') || 
-             error.message.includes('NetworkError') ||
-             error.message.includes('Network request failed') ||
-             error.message.includes('Connection refused'));
-        
-        // Return a default response instead of throwing
-        return {
-            success: false,
-            message: isConnectionError 
-                ? 'Tidak dapat terhubung ke server. Pastikan server backend berjalan.' 
-                : 'Could not get QR code',
-            qr: null,
-            isConnectionError: isConnectionError,
-            error: error.message
-        };
+export const getQRCode = async (forceRefresh = false, hardReset = false) => {
+  try {
+    const signal = abortPendingRequests();
+    console.log('Fetching WhatsApp QR code...', forceRefresh ? 'with force refresh' : '');
+    
+    const params = new URLSearchParams();
+    if (forceRefresh) params.append('refresh', 'true');
+    if (hardReset) params.append('hard_reset', 'true');
+    
+    const response = await fetch(`${API_BASE_URL}/api/whatsapp/qr${params.toString() ? '?' + params.toString() : ''}`, {
+      signal,
+      headers: {
+        'Accept': 'application/json',
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.log('QR code request was aborted');
+      throw error;
+    }
+    console.error('Error fetching QR code:', error);
+    return {
+      isConnectionError: true,
+      message: 'Could not connect to WhatsApp service'
+    };
+  }
 };
 
 export const getWhatsAppStatus = async () => {
-    try {
-        console.log('Checking WhatsApp status...');
-        
-        // Abort any pending requests before starting a new one
-        abortPendingRequests();
-        
-        // Create a new controller for this request
-        currentController = new AbortController();
-        
-        const response = await fetch(`${API_BASE_URL}/messages/status`, {
-            signal: currentController.signal,
-            headers: {
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            }
-        });
-        
-        const data = await response.json();
-        console.log('WhatsApp status response:', data);
-        return data;
-    } catch (error) {
-        console.error('Error getting WhatsApp status:', error);
-        
-        // Check if this is a connection error
-        const isConnectionError = 
-            error.name === 'TypeError' && 
-            (error.message.includes('Failed to fetch') || 
-             error.message.includes('NetworkError') ||
-             error.message.includes('Network request failed') ||
-             error.message.includes('Connection refused'));
-        
-        // Return a more specific response for connection errors
-        return {
-            success: false,
-            message: isConnectionError 
-                ? 'Tidak dapat terhubung ke server. Pastikan server backend berjalan.' 
-                : 'Could not connect to WhatsApp service',
-            connected: false,
-            isConnectionError: isConnectionError,
-            error: error.message
-        };
+  try {
+    const signal = abortPendingRequests();
+    console.log('Checking WhatsApp status...');
+    
+    const response = await fetch(`${API_BASE_URL}/api/whatsapp/status`, {
+      signal,
+      headers: {
+        'Accept': 'application/json',
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
+
+    const data = await response.json();
+    console.log('WhatsApp status response:', data);
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.log('Status request was aborted');
+      throw error;
+    }
+    console.error('Error getting WhatsApp status:', error);
+    return {
+      isConnectionError: true,
+      message: 'Could not connect to WhatsApp service',
+      connected: false
+    };
+  }
 };
 
 export const getMessageHistory = async (options = {}) => {
     try {
-        const { page = 1, limit = 10, status = '', search = '' } = options;
+        const { page = 1, limit = 10, status = '', search = '', date = '' } = options;
         
         const params = new URLSearchParams();
         params.append('page', page.toString());
         params.append('limit', limit.toString());
         if (status) params.append('status', status);
         if (search) params.append('search', search);
+        if (date) params.append('date', date); // Add date filter parameter
         
         console.log(`Fetching history with URL: ${API_BASE_URL}/history?${params}`);
         
@@ -163,10 +146,19 @@ export const getMessageHistory = async (options = {}) => {
         }
         
         console.log('Successful history response:', data);
+        
+        // Always ensure stats are present with default values if missing
+        const stats = data.stats || { todayCount: 0, totalCount: 0 };
+        
+        // Make sure stats have proper number values
+        stats.todayCount = parseInt(stats.todayCount || 0, 10);
+        stats.totalCount = parseInt(stats.totalCount || 0, 10);
+        
         return {
             success: true,
             data: data.data || [],
-            pagination: data.pagination || { total: 0, page: 1, pages: 1 }
+            pagination: data.pagination || { total: 0, page: 1, pages: 1 },
+            stats: stats
         };
     } catch (error) {
         console.error('Error getting message history:', error);

@@ -14,6 +14,7 @@ class WhatsAppService extends EventEmitter {
         this.lastError = null;
         this.qrTimeout = null;
         this.qrRetryCount = 0;
+        this.initializationPromise = null;
         
         // Initialize on next tick to avoid blocking server startup
         setTimeout(() => {
@@ -25,34 +26,66 @@ class WhatsAppService extends EventEmitter {
     }
 
     async initialize(destructiveReset = false) {
+        // Prevent multiple simultaneous initializations
+        if (this.initializationPromise) {
+            console.log('Already initializing, waiting for current initialization...');
+            return this.initializationPromise;
+        }
+
+        this.initializationPromise = this._doInitialize(destructiveReset);
+        try {
+            const result = await this.initializationPromise;
+            return result;
+        } finally {
+            this.initializationPromise = null;
+        }
+    }
+
+    async _doInitialize(destructiveReset = false) {
         try {
             this.qrCode = null;
             console.log(`WhatsApp initialize called at ${new Date().toISOString()}`, 
                         destructiveReset ? 'WITH DESTRUCTIVE RESET' : '');
             
-            if (this.isInitializing) {
-                console.log('Already initializing, cleaning up first...');
-                await this.cleanup();
-            }
+            // Always cleanup first
+            await this.cleanup();
 
             this.isInitializing = true;
+            this.lastError = null;
 
-            // Configure WhatsApp client with minimal browser settings
+            // If destructive reset, clear session
+            if (destructiveReset) {
+                await this.clearSession();
+                // Wait a bit after clearing session
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            // Configure WhatsApp client with robust settings
             this.client = new Client({
                 authStrategy: new LocalAuth({
-                    clientId: `wa-sender-client-${Date.now()}`,
-                    dataPath: path.join(__dirname, '..', 'wa-session')
+                    clientId: "whatsapp-sender",
+                    dataPath: "./whatsapp-session"
                 }),
                 puppeteer: {
                     headless: true,
-                    executablePath: process.env.CHROME_PATH || undefined, // Use system Chrome if available
                     args: [
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--no-first-run',
+                        '--no-zygote',
                         '--disable-gpu',
-                        '--disable-dev-shm-usage'
+                        '--disable-background-timer-throttling',
+                        '--disable-backgrounding-occluded-windows',
+                        '--disable-renderer-backgrounding',
+                        '--disable-features=TranslateUI',
+                        '--disable-ipc-flooding-protection'
                     ],
-                    browserWSEndpoint: undefined // Force new browser instance
+                    timeout: 120000, // Increase timeout to 2 minutes
+                    handleSIGINT: false,
+                    handleSIGTERM: false,
+                    handleSIGHUP: false
                 }
             });
 
@@ -75,6 +108,7 @@ class WhatsAppService extends EventEmitter {
                 this.isInitializing = false;
                 this.qrCode = null;
                 this.lastError = null;
+                this.qrRetryCount = 0;
                 this.emit('ready');
             });
 
@@ -82,21 +116,31 @@ class WhatsAppService extends EventEmitter {
                 console.error('WhatsApp authentication failed:', err);
                 this.lastError = 'Authentication failed';
                 this.isReady = false;
+                this.isInitializing = false;
                 this.emit('auth_failure', err);
             });
 
             this.client.on('disconnected', (reason) => {
                 console.log('WhatsApp client disconnected:', reason);
                 this.isReady = false;
+                this.isInitializing = false;
                 this.lastError = `Disconnected: ${reason}`;
                 this.emit('disconnected', reason);
                 
-                // Attempt to reinitialize after disconnect
+                // Attempt to reinitialize after disconnect with delay
                 setTimeout(() => {
                     if (!this.isInitializing && !this.isReady) {
-                        this.initialize(true).catch(console.error);
+                        console.log('Attempting to reinitialize after disconnect...');
+                        this.initialize(true).catch(err => {
+                            console.error('Failed to reinitialize after disconnect:', err);
+                        });
                     }
-                }, 5000);
+                }, 10000); // Wait 10 seconds before retry
+            });
+
+            // Add error handlers
+            this.client.on('change_state', (state) => {
+                console.log('WhatsApp state changed:', state);
             });
 
             console.log('Initializing WhatsApp client...');
@@ -107,6 +151,11 @@ class WhatsAppService extends EventEmitter {
             console.error('Error in WhatsApp initialization:', err);
             this.lastError = err.message;
             this.isInitializing = false;
+            this.isReady = false;
+            
+            // If initialization fails, try to cleanup
+            await this.cleanup().catch(console.error);
+            
             throw err;
         }
     }
@@ -115,12 +164,34 @@ class WhatsAppService extends EventEmitter {
         if (this.client) {
             try {
                 console.log('Cleaning up previous WhatsApp client...');
-                await this.client.destroy();
-                this.client = null;
+                
+                // Try to properly close browser first
+                if (this.client.pupBrowser && !this.client.pupBrowser.isClosed()) {
+                    try {
+                        await Promise.race([
+                            this.client.pupBrowser.close(),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('Browser close timeout')), 5000))
+                        ]);
+                        console.log('Browser closed successfully');
+                    } catch (err) {
+                        console.log('Error closing browser:', err.message);
+                    }
+                }
+
+                // Then destroy the client
+                await Promise.race([
+                    this.client.destroy(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Client destroy timeout')), 5000))
+                ]);
+                
+                console.log('Client destroyed successfully');
             } catch (err) {
-                console.error('Error during cleanup:', err);
+                console.error('Error during cleanup:', err.message);
+            } finally {
+                this.client = null;
             }
         }
+        
         this.isReady = false;
         this.isInitializing = false;
     }
@@ -131,13 +202,92 @@ class WhatsAppService extends EventEmitter {
         }
 
         try {
-            const msg = await this.client.sendMessage(to + '@c.us', message);
-            return msg;
+            // Clean and format the phone number
+            let phoneNumber = to.toString().trim();
+            console.log('Original phone number:', phoneNumber); // Debug log
+            
+            // Remove all non-digit characters except + at the beginning
+            phoneNumber = phoneNumber.replace(/[^\d+]/g, '');
+            console.log('After cleaning:', phoneNumber); // Debug log
+            
+            // Remove + if present
+            if (phoneNumber.startsWith('+')) {
+                phoneNumber = phoneNumber.substring(1);
+            }
+            
+            // Ensure Indonesian country code
+            if (phoneNumber.startsWith('0')) {
+                // Replace leading 0 with 62 (Indonesian country code)
+                phoneNumber = '62' + phoneNumber.substring(1);
+                console.log('After adding country code (from 0):', phoneNumber); // Debug log
+            } else if (!phoneNumber.startsWith('62')) {
+                // Add Indonesian country code if not present
+                phoneNumber = '62' + phoneNumber;
+                console.log('After adding country code (no 62):', phoneNumber); // Debug log
+            }
+            
+            // Validate phone number length (Indonesian mobile numbers)
+            if (phoneNumber.length < 10 || phoneNumber.length > 15) {
+                throw new Error('Invalid phone number length. Please use format: 08xxxxxxxxx or +628xxxxxxxxx');
+            }
+            
+            console.log(`Final phone number: ${phoneNumber} (original: ${to})`);
+            
+            // Try to get the chat first to validate the number
+            let chatId = phoneNumber + '@c.us';
+            console.log('Chat ID:', chatId); // Debug log
+            
+            try {
+                // Check if the contact exists and the number is valid
+                console.log('Checking contact validity...'); // Debug log
+                const contact = await this.client.getContactById(chatId);
+                console.log('Contact found:', contact.id._serialized); // Debug log
+                
+                if (!contact.isWAContact) {
+                    console.log('Contact is not a WhatsApp user'); // Debug log
+                    throw new Error('This number is not registered on WhatsApp');
+                }
+                console.log('Contact is valid WhatsApp user'); // Debug log
+            } catch (contactError) {
+                console.log('Contact validation error:', contactError.message);
+                // For some cases, we might still be able to send even if contact check fails
+                console.log('Will attempt to send anyway...'); // Debug log
+            }
+            
+            // Send the message
+            console.log('Attempting to send message...'); // Debug log
+            const msg = await this.client.sendMessage(chatId, message);
+            
+            console.log(`Message sent successfully to ${phoneNumber}`);
+            console.log('Message ID:', msg.id._serialized); // Debug log
+            
+            return {
+                success: true,
+                messageId: msg.id._serialized,
+                to: phoneNumber,
+                message: message,
+                timestamp: new Date().toISOString()
+            };
+            
         } catch (error) {
             console.error('Error sending message:', error);
-            throw error;
+            console.error('Error stack:', error.stack); // Debug log
+            
+            // Provide more specific error messages
+            let errorMessage = error.message;
+            if (error.message.includes('wid error: invalid wid')) {
+                errorMessage = 'Invalid phone number format. Please use format: 08xxxxxxxxx or +628xxxxxxxxx';
+            } else if (error.message.includes('Phone number is not registered')) {
+                errorMessage = 'This phone number is not registered on WhatsApp';
+            } else if (error.message.includes('not a WhatsApp user')) {
+                errorMessage = 'This number is not a WhatsApp user';
+            }
+            
+            throw new Error(errorMessage);
         }
-    }    getQRCode() {
+    }
+
+    getQRCode() {
         return this.qrCode;
     }
 
@@ -151,34 +301,18 @@ class WhatsAppService extends EventEmitter {
     
     isInitializingClient() {
         return this.isInitializing;
-    }    async clearSession() {
+    }
+
+    async clearSession() {
         try {
             console.log('Clearing WhatsApp session data completely...', new Date().toISOString());
             
             // Make sure any existing client is destroyed first
-            if (this.client) {
-                try {
-                    // Try to close the browser first if it exists
-                    if (this.client.pupBrowser) {
-                        console.log('Closing browser before destroying client...');
-                        await this.client.pupBrowser.close().catch(e => 
-                            console.log('Error closing browser:', e));
-                    }
-                    
-                    // Then destroy the client
-                    await this.client.destroy().catch(e => 
-                        console.log('Error destroying client:', e));
-                } catch (err) {
-                    console.log('Error while destroying client:', err);
-                }
-                this.client = null;
-            }
+            await this.cleanup();
             
             // Force cleanup of the session directory
             try {
-                const fs = require('fs');
-                const path = require('path');
-                const sessionDir = path.join(__dirname, '..', 'wa-session');
+                const sessionDir = path.join(__dirname, '..', 'whatsapp-session');
                 
                 if (fs.existsSync(sessionDir)) {
                     console.log('Removing session directory completely');
@@ -199,19 +333,12 @@ class WhatsAppService extends EventEmitter {
                     // Try to fully remove directory
                     fs.rmSync(sessionDir, { recursive: true, force: true });
                     
+                    // Wait a bit
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
                     // Recreate empty directory
                     fs.mkdirSync(sessionDir, { recursive: true });
                     console.log('Session directory recreated empty');
-                    
-                    // Additional: kill any chrome processes that might be related
-                    try {
-                        if (process.platform === 'win32') {
-                            // On Windows, try to kill Chrome processes
-                            require('child_process').exec('taskkill /f /im chrome.exe', () => {});
-                        }
-                    } catch (e) {
-                        console.log('Error killing chrome processes:', e);
-                    }
                 }
             } catch (e) {
                 console.error('Error during session cleanup:', e);

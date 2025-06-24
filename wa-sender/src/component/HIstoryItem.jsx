@@ -5,11 +5,11 @@ function HistoryItem({ item }) {
     switch (status) {
       case 'sent':
         return {
-          border: 'border-l-[#F36F21]',
-          bg: 'bg-orange-50',
-          text: 'text-[#F36F21]',
-          bgButton: 'bg-[#F36F21]',
-          hoverButton: 'hover:bg-[#d15d1a]'
+          border: 'border-l-[#25D366]',
+          bg: 'bg-green-50',
+          text: 'text-[#25D366]',
+          bgButton: 'bg-[#25D366]',
+          hoverButton: 'hover:bg-[#1EBE5D]'
         };
       case 'replied':
         return {
@@ -32,7 +32,9 @@ function HistoryItem({ item }) {
 
   const styles = getStatusStyles(item.status);
   const statusText = item.status === 'sent' ? 'Terkirim' : 'Dibalas';
-  const formattedDate = new Date(item.sent_at || item.created_at).toLocaleString('id-ID', {
+  
+  // Use created_at as the primary date field, then fall back to sent_at
+  const formattedDate = new Date(item.created_at || item.sent_at).toLocaleString('id-ID', {
     dateStyle: 'medium',
     timeStyle: 'short'
   });
@@ -61,7 +63,8 @@ function HistoryItem({ item }) {
               </span>
             </div>
             
-            <div className="mt-2 space-y-1">              <p className="text-sm text-gray-600">
+            <div className="mt-2 space-y-1">
+              <p className="text-sm text-gray-600">
                 <span className="font-medium">No. Rekening:</span> {item.no_rekening}
               </p>
               <p className="text-sm text-gray-600">
