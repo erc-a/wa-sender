@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../config/database');
+const { pool, supabase } = require('../config/database');
 const whatsappService = require('../services/whatsapp');
 
 // Get WhatsApp connection status
@@ -238,9 +238,8 @@ router.post('/send', async (req, res) => {
                     jumlah_tunggakan,
                     skor_kredit
                 });
-                
-                await db.query(
-                    'INSERT INTO messages (nama_nasabah, nomor_telepon, no_rekening, jumlah_tunggakan, skor_kredit, status, wa_message_id, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                  await pool.query(
+                    'INSERT INTO messages (nama_nasabah, nomor_telepon, no_rekening, jumlah_tunggakan, skor_kredit, status, wa_message_id, sent_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
                     [nama_nasabah, result.to, no_rekening, jumlah_tunggakan, skor_kredit, 'sent', result.messageId || null, new Date()]
                 );
                 console.log('Message logged to database'); // Debug log

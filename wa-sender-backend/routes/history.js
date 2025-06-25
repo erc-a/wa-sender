@@ -1,15 +1,14 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../config/database');
+const { pool, supabase } = require('../config/database');
 
 // Get all messages with pagination and filters
 router.get('/', async (req, res) => {
     try {
         console.log('Fetching history with params:', req.query);
-        
-        // Test database connection first
+          // Test database connection first
         try {
-            await db.query('SELECT 1');
+            await pool.query('SELECT 1');
             console.log('Database connection is working');
         } catch (dbError) {
             console.error('Database connection test failed:', dbError);
@@ -18,16 +17,26 @@ router.get('/', async (req, res) => {
                 message: 'Database connection failed',
                 error: process.env.NODE_ENV === 'development' ? dbError.message : undefined
             });
-        }        // Validate and sanitize input parameters
+        }
+        
+        // Validate and sanitize input parameters
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
         const offset = (page - 1) * limit;
         const status = req.query.status && ['sent', 'replied'].includes(req.query.status) 
             ? req.query.status 
             : '';
-        const search = (req.query.search || '').trim();// Verify messages table exists
+        const search = (req.query.search || '').trim();
+        
+        // Verify messages table exists
         try {
-            await db.query('DESCRIBE messages');
+            await pool.query(`
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                    AND table_name = 'messages'
+                )
+            `);
             console.log('Messages table exists');
         } catch (tableError) {
             console.error('Messages table check failed:', tableError);
@@ -47,20 +56,22 @@ router.get('/', async (req, res) => {
             query += ' AND status = ?';
             countQuery += ' AND status = ?';
             params.push(String(status)); // Ensure status is string
-        }
-
-        // Add search filter if provided
+        }        // Add search filter if provided
         if (search) {
             const searchPattern = `%${search.trim()}%`; // Trim whitespace
-            query += ' AND (nama_nasabah LIKE ? OR nomor_telepon LIKE ? OR no_rekening LIKE ?)';
-            countQuery += ' AND (nama_nasabah LIKE ? OR nomor_telepon LIKE ? OR no_rekening LIKE ?)';
+            query += ' AND (nama_nasabah ILIKE $' + (params.length + 1) + ' OR nomor_telepon ILIKE $' + (params.length + 2) + ' OR no_rekening ILIKE $' + (params.length + 3) + ')';
+            countQuery += ' AND (nama_nasabah ILIKE $' + (params.length + 1) + ' OR nomor_telepon ILIKE $' + (params.length + 2) + ' OR no_rekening ILIKE $' + (params.length + 3) + ')';
             params.push(searchPattern, searchPattern, searchPattern);
-        }        // Get total count before adding pagination
+        }
+        
+        // Get total count before adding pagination
         console.log('Executing count query:', countQuery, 'with params:', JSON.stringify(params));
-        const [countResult] = await db.execute(countQuery, [...params]); // Clone params to avoid reference issues
-        const total = countResult[0].total;// Add sorting and pagination to the main query
-        query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-        // Ensure parameters are sent as correct type for MySQL
+        const countResult = await pool.query(countQuery, [...params]); // Clone params to avoid reference issues
+        const total = parseInt(countResult.rows[0].total);
+        
+        // Add sorting and pagination to the main query
+        query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
+        // Ensure parameters are sent as correct type for PostgreSQL
         params.push(parseInt(limit), parseInt(offset));
 
         // Log queries for debugging
@@ -69,11 +80,11 @@ router.get('/', async (req, res) => {
         console.log('Status:', status, 'Search:', search);
         console.log('Final Query:', query);
         console.log('Params length:', params.length);
-        console.log('Final Parameters:', JSON.stringify(params));        try {
-            // Get paginated results - use new params array to avoid any reference issues
+        console.log('Final Parameters:', JSON.stringify(params));        try {            // Get paginated results - use new params array to avoid any reference issues
             const queryParams = [...params];
             console.log('Executing main query with params:', JSON.stringify(queryParams));
-            const [messages] = await db.execute(query, queryParams);
+            const result = await pool.query(query, queryParams);
+            const messages = result.rows;
             console.log(`Found ${messages.length} messages out of ${total} total`);
         } catch (queryError) {
             console.error('Error executing main query:', queryError);
@@ -127,11 +138,12 @@ router.get('/', async (req, res) => {
 
 // Get a single message by ID
 router.get('/:id', async (req, res) => {
-    try {
-        const [messages] = await db.execute(
-            'SELECT * FROM messages WHERE id = ?',
+    try {        const result = await pool.query(
+            'SELECT * FROM messages WHERE id = $1',
             [req.params.id]
         );
+        
+        const messages = result.rows;
 
         if (messages.length === 0) {
             return res.status(404).json({
@@ -157,26 +169,24 @@ router.get('/:id', async (req, res) => {
 router.put('/:id/reply', async (req, res) => {
     try {
         const { replyMessage } = req.body;
-        
-        const [result] = await db.execute(
+          const updateResult = await pool.query(
             `UPDATE messages 
              SET status = 'replied', 
-                 reply_message = ?,
+                 reply_message = $1,
                  replied_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
+             WHERE id = $2
+             RETURNING *`,
             [replyMessage, req.params.id]
         );
 
-        if (result.affectedRows === 0) {
+        if (updateResult.rowCount === 0) {
             return res.status(404).json({
                 success: false,
                 message: 'Message not found'
             });
-        }
-
-        // Get updated message
-        const [messages] = await db.execute(
-            'SELECT * FROM messages WHERE id = ?',
+        }        // Get updated message
+        const result = await pool.query(
+            'SELECT * FROM messages WHERE id = $1',
             [req.params.id]
         );
 

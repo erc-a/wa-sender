@@ -1,15 +1,14 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../config/database');
+const { pool, supabase } = require('../config/database');
 
 // Get message history with pagination and filters
 router.get('/', async (req, res) => {
     try {
         console.log('Fetching history with params:', req.query);
-        
-        // Test database connection first
+          // Test database connection first
         try {
-            await db.query('SELECT 1');
+            await pool.query('SELECT 1');
             console.log('Database connection is working');
         } catch (dbError) {
             console.error('Database connection test failed:', dbError);
@@ -28,10 +27,15 @@ router.get('/', async (req, res) => {
             ? req.query.status 
             : '';
         const search = (req.query.search || '').trim();
-        
-        // Verify messages table exists
+          // Verify messages table exists
         try {
-            await db.query('DESCRIBE messages');
+            await pool.query(`
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                    AND table_name = 'messages'
+                )
+            `);
             console.log('Messages table exists');
         } catch (tableError) {
             console.error('Messages table check failed:', tableError);
@@ -53,19 +57,38 @@ router.get('/', async (req, res) => {
             const searchPattern = `%${search.trim()}%`;
             whereClause += ` AND (nama_nasabah LIKE '${searchPattern}' OR nomor_telepon LIKE '${searchPattern}' OR no_rekening LIKE '${searchPattern}')`;
         }
+          // This method of constructing SQL queries is vulnerable to SQL injection!
+        // For PostgreSQL, we should use parameterized queries instead
+        // Converting the original approach to use parameterized queries:
+        
+        const params = [];
+        let queryString = '1=1';
+        
+        if (status) {
+            params.push(status);
+            queryString += ` AND status = $${params.length}`;
+        }
+        
+        if (search) {
+            const searchPattern = `%${search.trim()}%`;
+            params.push(searchPattern, searchPattern, searchPattern);
+            queryString += ` AND (nama_nasabah ILIKE $${params.length-2} OR nomor_telepon ILIKE $${params.length-1} OR no_rekening ILIKE $${params.length})`;
+        }
         
         // Count total records
-        const countQuery = `SELECT COUNT(*) as total FROM messages WHERE ${whereClause}`;
+        const countQuery = `SELECT COUNT(*) as total FROM messages WHERE ${queryString}`;
         console.log('Count query:', countQuery);
         
-        const [countResult] = await db.query(countQuery);
-        const total = countResult[0].total;
+        const countResult = await pool.query(countQuery, params);
+        const total = parseInt(countResult.rows[0].total);
         
         // Get paginated data
-        const dataQuery = `SELECT * FROM messages WHERE ${whereClause} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+        params.push(limit, offset);
+        const dataQuery = `SELECT * FROM messages WHERE ${queryString} ORDER BY created_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`;
         console.log('Data query:', dataQuery);
         
-        const [messages] = await db.query(dataQuery);
+        const result = await pool.query(dataQuery, params);
+        const messages = result.rows;
         console.log(`Found ${messages.length} messages out of ${total} total`);
         
         res.json({
