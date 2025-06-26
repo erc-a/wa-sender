@@ -66,7 +66,7 @@ class WhatsAppService extends EventEmitter {
                     clientId: "whatsapp-sender",
                     dataPath: "./whatsapp-session"
                 }),
-                puppeteer: {
+                playwright: {
                     headless: true,
                     args: [
                         '--no-sandbox',
