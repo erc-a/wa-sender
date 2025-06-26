@@ -11,20 +11,10 @@ const abortPendingRequests = () => {
   return abortController.signal;
 };
 
-export const sendMessage = async (phoneNumber, message, formData = null) => {
+export const sendMessage = async (formData) => {
   try {
-    console.log('Sending request with:', { to: phoneNumber, message, formData }); // Debug log
-    
-    // Prepare request data
-    const requestData = {
-      to: phoneNumber,
-      message: message
-    };
-    
-    // Add form data if available
-    if (formData) {
-      requestData.formData = formData;
-    }
+    const requestData = { formData };
+    console.log('API: Sending message with request data:', JSON.stringify(requestData, null, 2));
     
     const response = await fetch(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
@@ -34,18 +24,28 @@ export const sendMessage = async (phoneNumber, message, formData = null) => {
       body: JSON.stringify(requestData)
     });
 
-    console.log('Response status:', response.status); // Debug log
+    console.log('API: Response status:', response.status);
+    
+    // Always try to parse response body
+    const responseText = await response.text();
+    console.log('API: Raw response:', responseText);
+    
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      console.error('API: Failed to parse response as JSON:', e);
+      throw new Error(`Invalid response format: ${responseText}`);
+    }
     
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ message: 'Network error' }));
-      throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+      throw new Error(data.error || `Server error: ${response.status}`);
     }
 
-    const data = await response.json();
-    console.log('Send message response:', data); // Debug log
+    console.log('API: Send message response:', data);
     return data;
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error('API: Error sending message:', error);
     throw error;
   }
 };
@@ -129,22 +129,28 @@ export const getMessageHistory = async (options = {}) => {
         if (search) params.append('search', search);
         if (date) params.append('date', date); // Add date filter parameter
         
-        console.log(`Fetching history with URL: ${API_BASE_URL}/history?${params}`);
+        console.log('Fetching history with URL:', `${API_BASE_URL}/api/history?${params}`);
         
-        const response = await fetch(`${API_BASE_URL}/history?${params}`, {
+        const response = await fetch(`${API_BASE_URL}/api/history?${params}`, {
             method: 'GET',
             headers: {
                 'Accept': 'application/json'
             }
         });
         
-        const data = await response.json();
-        
         if (!response.ok) {
-            console.error('Server error response:', data);
-            throw new Error(data.message || data.error || `Server error: ${response.status}`);
+            const text = await response.text();
+            let errorMessage;
+            try {
+                const errorData = JSON.parse(text);
+                errorMessage = errorData.message || errorData.error || `Server error: ${response.status}`;
+            } catch (e) {
+                errorMessage = `Server error: ${response.status}`;
+            }
+            throw new Error(errorMessage);
         }
         
+        const data = await response.json();
         console.log('Successful history response:', data);
         
         // Always ensure stats are present with default values if missing

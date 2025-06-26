@@ -78,11 +78,11 @@ const memoryDb = {
                 nama_nasabah: params[0] || 'Test User',
                 nomor_telepon: params[1] || '123456789',
                 no_rekening: params[2] || '123456789',
-                jumlah_tunggakan: params[3] || 1000000,
-                skor_kredit: params[4] || 3,
-                status: params[5] || 'sent',
-                wa_message_id: params[6],
-                sent_at: params[7] || new Date(),
+                jumlah_tunggakan: params[3] || 1000000,                macet: params[4] !== undefined ? params[4] : true,
+                daftar_hitam: params[5] !== undefined ? params[5] : true,
+                status: params[6] || 'sent',
+                wa_message_id: params[7],
+                sent_at: params[8] || new Date(),
                 created_at: new Date(),
                 updated_at: new Date()
             };

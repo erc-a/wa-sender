@@ -1,261 +1,223 @@
 const express = require('express');
 const router = express.Router();
-const { pool, supabase } = require('../config/database');
+const db = require('../config/database');
 const whatsappService = require('../services/whatsapp');
 
-// Get WhatsApp connection status
-router.get('/status', (req, res) => {
-    try {
-        const status = {
-            isReady: whatsappService.isReady,
-            isInitializing: whatsappService.isInitializing,
-            lastError: whatsappService.lastError,
-            qrCode: whatsappService.qrCode
-        };
-        res.json(status);
-    } catch (error) {
-        console.error('Error getting WhatsApp status:', error);
-        res.status(500).json({ error: 'Failed to get WhatsApp status' });
+// Validation helper
+const validateFormData = (formData) => {
+    const errors = [];
+    
+    if (!formData) {
+        return ['Form data is required'];
     }
-});
+
+    // Log the received data for debugging
+    console.log('Validating form data:', JSON.stringify(formData, null, 2));    // Check required fields
+    const requiredFields = [
+        { field: 'nama_nasabah', name: 'Nama Nasabah' },
+        { field: 'nomor_telepon', name: 'Nomor Telepon' },
+        { field: 'no_rekening', name: 'Nomor Rekening' },
+        { field: 'jumlah_tunggakan', name: 'Jumlah Tunggakan' },
+        { field: 'macet', name: 'Status Macet' },
+        { field: 'daftar_hitam', name: 'Status Daftar Hitam' }
+    ];
+
+    for (const { field, name } of requiredFields) {
+        if (!formData[field]) {
+            errors.push(`${name} is required`);
+        }
+    }
+
+    // Validate phone number format
+    if (formData.nomor_telepon) {
+        const phoneNumber = formData.nomor_telepon.replace(/\s+/g, '');
+        if (!phoneNumber.match(/^\+?[\d-]+$/)) {
+            errors.push('Invalid phone number format');
+        }
+    }
+
+    // Validate numeric fields
+    if (formData.jumlah_tunggakan) {
+        const amount = parseFloat(formData.jumlah_tunggakan);
+        if (isNaN(amount) || amount <= 0) {
+            errors.push('Jumlah Tunggakan must be a positive number');
+        }
+    }
+
+    // Ensure boolean fields are properly typed
+    if (formData.macet !== undefined && typeof formData.macet !== 'boolean') {
+        formData.macet = formData.macet === 'true' || formData.macet === true;
+    }
+    if (formData.daftar_hitam !== undefined && typeof formData.daftar_hitam !== 'boolean') {
+        formData.daftar_hitam = formData.daftar_hitam === 'true' || formData.daftar_hitam === true;
+    }
+
+    return errors;
+};
 
 // Format pesan WhatsApp
 function formatMessage(data) {
-    return `*PEMBERITAHUAN TUNGGAKAN KREDIT*
+    // Ensure macet and daftar_hitam are handled as booleans
+    const isMacet = data.macet === true;
+    const isDaftarHitam = data.daftar_hitam === true;
+    
+    // Get current month and year
+    const currentDate = new Date();
+    const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    const currentMonth = monthNames[currentDate.getMonth()];
+    const currentYear = currentDate.getFullYear();
 
-Yth. Bapak/Ibu ${data.nama_nasabah}
-No. Rekening: ${data.no_rekening}
+    // Format the amount with proper Indonesian formatting
+    const formattedAmount = Number(data.jumlah_tunggakan).toLocaleString('id-ID', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
 
-Dengan hormat,
-Kami informasikan bahwa rekening Bapak/Ibu tercatat memiliki tunggakan sebesar Rp ${Number(data.jumlah_tunggakan).toLocaleString('id-ID')}.
+    // Build status text
+    const statusText = isMacet ? 'Kredit Macet' : '';
+    const additionalStatus = isDaftarHitam ? '(Daftar Hitam)' : '';
 
-Status kredit Anda saat ini:
-${getSkorKreditDescription(data.skor_kredit)}
+    return `Nasabah Kartu Kredit BRI Yth,
 
-Mohon segera melakukan pembayaran untuk menghindari denda keterlambatan.
+Dinformasikan bahwa Kartu Kredit BRI Bapak/Ibu telah masuk kolektibilitas ${statusText} pada SLIK OJK dengan keterangan sebagai berikut:
 
-Abaikan pesan ini jika sudah melakukan pembayaran.
+Nama Nasabah : ${data.nama_nasabah}
+No Kartu : ${data.no_rekening}
+Jumlah Tagihan : Rp ${formattedAmount} ${additionalStatus}
 
-Terima kasih.
-*Bank BRI*`;
+Dapatkan segera program keringanan khusus di bulan ${currentMonth} ${currentYear}:
+
+1. Lunas diskon*
+      *Surat lunas di terbitkan 1 hari
+      *Cleansing slik OJK segera
+      *Kartu di tutup permanent
+      *Jika ingin melakukan pinjaman
+       atau kredit KPR sudah bisa di
+       realisasikan
+
+*Syarat dan ketentuan berlaku
+Ajukan program keringanan melalui
+hubungi 085609553363
+Tagihan akan diserahkan kepihak Debcollector bila tidak ada kejelasan
+
+Terima kasih, selamat beraktifitas dan selalu jaga kesehatan
+Info lebih lanjut, hubungi Contact BRI 150017`;
 }
 
-function getSkorKreditDescription(skor) {
-    const descriptions = {
-        1: 'Kredit Lancar - Tidak pernah menunggak',
-        2: 'Kredit DPK - Menunggak 1-90 hari',
-        3: 'Kredit Tidak Lancar - Menunggak 91-120 hari',
-        4: 'Kredit Diragukan - Menunggak 121-180 hari',
-        5: 'Kredit Macet - Menunggak lebih dari 180 hari'
-    };
-    return descriptions[skor] || 'Status kredit tidak diketahui';
-}
-
-// Get QR Code for WhatsApp Web
-router.get('/qr', (req, res) => {
+// Send message endpoint
+router.post('/send', async (req, res) => {
+    console.log('Received request:', {
+        url: req.url,
+        method: req.method,
+        headers: req.headers,
+        body: JSON.stringify(req.body, null, 2)
+    });
+    
     try {
-        // Check if a refresh is requested via query param
-        const forceRefresh = req.query.refresh === 'true';
-        const hardReset = req.query.hardReset === 'true';
+        // Accept formData either nested or direct
+        const formData = req.body.formData || req.body;
         
-        if (forceRefresh) {
-            console.log('Forcing complete QR code refresh from API request...', 
-                        hardReset ? '(WITH HARD RESET)' : '', 
-                        new Date().toISOString());
-            
-            // Completely reinitialize the service
-            if (hardReset) {                // For hard reset, force clean all session data first
-                console.log('PERFORMING HARD RESET OF SESSION');
-                
-                // Use async/await pattern for session clearing and initialization
-                (async () => {
-                    try {
-                        // Clear session first
-                        await whatsappService.clearSession();
-                        
-                        // Give a moment for file system operations to complete
-                        setTimeout(async () => {
-                            try {
-                                await whatsappService.initialize(true); // true = destructive reinit
-                            } catch (err) {
-                                console.error('Error during hard reset initialization:', err);
-                            }
-                        }, 1000);
-                    } catch (err) {
-                        console.error('Error during session clearing:', err);
-                    }
-                })();} else {
-                // Handle normal initialize
-                whatsappService.initialize().catch(err => {
-                    console.error('Error during normal QR refresh initialization:', err);
-                });
-            }
-            
-            return res.json({
-                success: true,
-                message: 'QR code refresh initiated. Please wait while a new QR code is generated.',
-                qr: null,
-                refreshing: true,
-                hardReset: hardReset,
-                timestamp: new Date().toISOString()
+        // Log received form data
+        console.log('Received form data:', JSON.stringify(formData, null, 2));
+
+        // Validate form data
+        const validationErrors = validateFormData(formData);
+        if (validationErrors.length > 0) {
+            console.log('Validation errors:', validationErrors);
+            return res.status(400).json({
+                success: false,
+                error: validationErrors.join(', ')
             });
+        }        // Process and clean form data
+        const processedData = {
+            nama_nasabah: formData.nama_nasabah.trim(),
+            nomor_telepon: formData.nomor_telepon.replace(/\s+/g, ''),
+            no_rekening: formData.no_rekening.trim(),
+            jumlah_tunggakan: parseFloat(formData.jumlah_tunggakan),
+            macet: formData.macet === true,
+            daftar_hitam: formData.daftar_hitam === true
+        };
+
+        // Ensure phone number starts with +
+        if (!processedData.nomor_telepon.startsWith('+')) {
+            processedData.nomor_telepon = '+' + processedData.nomor_telepon;
         }
-          const qr = whatsappService.getQRCode();
-        if (qr) {
-            const requestId = Math.random().toString(36).substring(2, 10);
-            console.log(`Sending QR code to client (request ${requestId})`, new Date().toISOString());
-            
-            // Send the QR code with cache-busting headers
-            return res.set({
-                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-                'Pragma': 'no-cache',
-                'Expires': '0',
-                'Surrogate-Control': 'no-store'
-            }).json({ 
+
+        // Log processed data
+        console.log('Processed data:', JSON.stringify(processedData, null, 2));
+
+        // Save message to database
+        console.log('Saving message to database...');
+        const savedMessage = await db.addMessage(processedData);
+        
+        if (!savedMessage) {
+            throw new Error('Failed to save message to database');
+        }
+        console.log('Message saved successfully:', savedMessage);
+
+        // Format and send WhatsApp message
+        const messageText = formatMessage(processedData);
+        console.log('Sending WhatsApp message to:', processedData.nomor_telepon);
+        console.log('Message text:', messageText);
+
+        const result = await whatsappService.sendMessage(
+            processedData.nomor_telepon, 
+            messageText
+        );
+        console.log('WhatsApp send result:', result);
+        
+        if (result.success) {
+            await db.updateMessageStatus(savedMessage.id, 'sent', result.messageId);
+            res.json({ 
                 success: true, 
-                qr: qr, // Return exactly as is - don't modify the data URL
-                requestId,
-                timestamp: new Date().toISOString()
+                message: 'Message sent successfully',
+                messageId: result.messageId,
+                data: savedMessage
             });
         } else {
-            // If no QR code is available, force a reinitialize and inform the client
-            if (!whatsappService.isClientReady() && !whatsappService.isInitializingClient()) {
-                console.log('No QR code available, triggering initialize...', new Date().toISOString());
-                whatsappService.initialize();
-            }
-            
-            return res.json({ 
-                success: false, 
-                message: 'QR Code not available yet. Please try again in a few seconds.',
-                qr: null,
-                isInitializing: whatsappService.isInitializingClient(),
-                timestamp: new Date().toISOString()
-            });
+            await db.updateMessageStatus(savedMessage.id, 'failed');
+            throw new Error(result.error || 'Failed to send message');
         }
+
     } catch (error) {
-        console.error('Error getting QR code:', error);
-        return res.status(500).json({ 
+        console.error('Error in /send endpoint:', error);
+        res.status(500).json({ 
             success: false, 
-            message: 'Error fetching QR code', 
-            error: error.message 
+            error: error.message || 'Failed to send message'
         });
     }
 });
 
-// Send a new message
-router.post('/send', async (req, res) => {
+// Get all messages
+router.get('/', async (req, res) => {
     try {
-        console.log('Received send message request:', req.body); // Debug log
-        
-        const { to, message, formData } = req.body;
-        
-        if (!to || !message) {
-            console.log('Missing required fields:', { to: !!to, message: !!message }); // Debug log
-            return res.status(400).json({
-                success: false,
-                message: 'Phone number and message are required'
-            });
-        }
-        
-        // Log form data if available
-        if (formData) {
-            console.log('Form data received:', formData);
-        }
-
-        console.log(`Attempting to send message to: ${to}`); // Debug log
-        console.log(`Message length: ${message.length} characters`); // Debug log
-        
-        const result = await whatsappService.sendMessage(to, message);
-        
-        console.log('Send message result:', result); // Debug log
-          // Log to database if available
-        if (db) {
-            try {
-                // Parse message to extract customer info (using more precise regex patterns)
-                let nama_nasabah = 'Unknown';
-                let no_rekening = 'Unknown';
-                let jumlah_tunggakan = 0;
-                let skor_kredit = 0;
-                
-                // Extract information from the message using more precise patterns
-                try {
-                    // Extract customer name (looking for the pattern right after "Halo" at the beginning)
-                    const nameMatch = message.match(/Halo ([^,\n]+)/);
-                    if (nameMatch && nameMatch[1]) {
-                        nama_nasabah = nameMatch[1].trim();
-                    }
-                    
-                    // Extract account number (looking specifically for the format with label)
-                    const rekeningMatch = message.match(/No\. Rekening: ([^\n]+)/);
-                    if (rekeningMatch && rekeningMatch[1]) {
-                        no_rekening = rekeningMatch[1].trim();
-                    }
-                    
-                    // Extract debt amount with more precise pattern
-                    const tunggakanMatch = message.match(/tunggakan kredit sebesar ([^\n.]+)/);
-                    if (tunggakanMatch && tunggakanMatch[1]) {
-                        // Convert to number, handling IDR format
-                        const amountStr = tunggakanMatch[1].replace(/[^\d]/g, '');
-                        jumlah_tunggakan = parseInt(amountStr);
-                    }
-                    
-                    // Extract credit score from status line
-                    const skorMatch = message.match(/Status Kredit: ([^\n]+)/);
-                    if (skorMatch && skorMatch[1]) {
-                        // Try to determine score from status text
-                        const statusText = skorMatch[1].toLowerCase();
-                        if (statusText.includes('lancar')) {
-                            skor_kredit = 1;
-                        } else if (statusText.includes('dpk') || statusText.includes('1-90')) {
-                            skor_kredit = 2;
-                        } else if (statusText.includes('tidak lancar') || statusText.includes('91-120')) {
-                            skor_kredit = 3;
-                        } else if (statusText.includes('diragukan') || statusText.includes('121-180')) {
-                            skor_kredit = 4;
-                        } else if (statusText.includes('macet') || statusText.includes('180')) {
-                            skor_kredit = 5;
-                        } else {
-                            skor_kredit = 650;
-                        }
-                    } else {
-                        skor_kredit = 650; // Default
-                    }
-                } catch (parseError) {
-                    console.warn('Failed to parse message data:', parseError);
-                }
-                  // Use form data if available, otherwise use parsed data
-                if (req.body.formData) {
-                    nama_nasabah = req.body.formData.nama_nasabah || nama_nasabah;
-                    no_rekening = req.body.formData.no_rekening || no_rekening;
-                    jumlah_tunggakan = req.body.formData.jumlah_tunggakan || jumlah_tunggakan;
-                    skor_kredit = req.body.formData.skor_kredit || skor_kredit;
-                }
-                
-                console.log('Inserting message with final data:', {
-                    nama_nasabah,
-                    nomor_telepon: result.to,
-                    no_rekening,
-                    jumlah_tunggakan,
-                    skor_kredit
-                });
-                  await pool.query(
-                    'INSERT INTO messages (nama_nasabah, nomor_telepon, no_rekening, jumlah_tunggakan, skor_kredit, status, wa_message_id, sent_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
-                    [nama_nasabah, result.to, no_rekening, jumlah_tunggakan, skor_kredit, 'sent', result.messageId || null, new Date()]
-                );
-                console.log('Message logged to database'); // Debug log
-            } catch (dbError) {
-                console.error('Failed to log message to database:', dbError);
-            }
-        }
-        
-        res.json(result);
+        const messages = await db.getMessages();
+        res.json({
+            success: true,
+            data: messages
+        });
     } catch (error) {
-        console.error('Error in send message route:', error);
-        console.error('Error stack:', error.stack); // Debug log
-        
-        res.status(500).json({
-            success: false,
-            message: error.message || 'Failed to send message'
+        console.error('Error fetching messages:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to fetch messages' 
+        });
+    }
+});
+
+// Get pending messages
+router.get('/pending', async (req, res) => {
+    try {
+        const messages = await db.getPendingMessages();
+        res.json({
+            success: true,
+            data: messages
+        });
+    } catch (error) {
+        console.error('Error fetching pending messages:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to fetch pending messages' 
         });
     }
 });

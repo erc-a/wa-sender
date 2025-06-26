@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS messages (
     no_rekening VARCHAR(50) NOT NULL,
     jumlah_tunggakan DECIMAL(15,2) NOT NULL,
     skor_kredit INT NOT NULL,
-    status VARCHAR(10) NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'replied')),
+    status VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'replied', 'failed')),
     wa_message_id VARCHAR(100),
     reply_message TEXT,
     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
