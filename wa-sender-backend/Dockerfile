@@ -46,8 +46,19 @@ WORKDIR /app
 # Salin package.json dan package-lock.json terlebih dahulu
 COPY package.json package-lock.json ./
 
-# Install dependensi
-RUN npm install
+# Install dependencies with increased timeout
+RUN npm config set network-timeout 100000 && npm install
+
+# Copy rest of the application
+COPY . .
+
+# Set environment variables for Puppeteer
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+EXPOSE 3000
+
+CMD ["npm", "start"]
 
 # Salin semua sisa kode aplikasi
 COPY . .
