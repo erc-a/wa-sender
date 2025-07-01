@@ -7,6 +7,10 @@ const app = express();
 // Import database interface
 const db = require('./config/database');
 
+// Import routes
+const messagesRouter = require('./routes/messages');
+const historyRouter = require('./routes/history');
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -18,9 +22,17 @@ app.use((req, res, next) => {
 });
 
 // Routes
-const messagesRouter = require('./routes/messages');
-const historyRouter = require('./routes/history');
-const whatsappRouter = require('./routes/whatsapp');
+app.use('/api/messages', messagesRouter);
+app.use('/api/history', historyRouter);
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).json({
+        error: 'An unexpected error occurred',
+        message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+});
 
 // Basic health check endpoint
 app.get('/health', (req, res) => {
@@ -28,21 +40,6 @@ app.get('/health', (req, res) => {
         status: 'ok', 
         timestamp: new Date().toISOString(),
         database: db ? 'connected' : 'not connected'
-    });
-});
-
-// API routes
-app.use('/api/messages', messagesRouter);
-app.use('/api/history', historyRouter);
-app.use('/api/whatsapp', whatsappRouter);
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-    console.error('Error:', err);
-    res.status(500).json({
-        success: false,
-        message: 'Internal Server Error',
-        error: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
 });
 
