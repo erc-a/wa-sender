@@ -1,8 +1,8 @@
-# Gunakan gambar dasar Node.js yang sudah ada
-FROM node:18-slim
+# Use Node.js LTS
+FROM node:20-slim
 
-# Install semua "onderdil" yang dibutuhkan oleh Puppeteer/Chrome
-RUN apt-get update && apt-get install -y \
+# Install Chrome and other dependencies
+RUN apt-get update && apt-get install -y chromium procps \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -46,15 +46,24 @@ WORKDIR /app
 # Salin package.json dan package-lock.json terlebih dahulu
 COPY package.json package-lock.json ./
 
-# Install dependencies with increased timeout
-RUN npm config set network-timeout 100000 && npm install
+# Install dependencies with specific config
+RUN npm config set network-timeout 300000 \
+    && npm config set fetch-retries 5 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm install --no-optional --legacy-peer-deps
 
 # Copy rest of the application
 COPY . .
 
-# Set environment variables for Puppeteer
+# Set environment variables for Puppeteer and Node
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    NODE_OPTIONS="--max-old-space-size=2048" \
+    NODE_ENV=production
+
+# Clean npm cache
+RUN npm cache clean --force
 
 EXPOSE 3000
 
